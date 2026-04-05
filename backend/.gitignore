@@ -1,0 +1,8 @@
+node_modules
+dist
+.env
+.env.*
+!.env.example
+finance.db
+finance.db-shm
+finance.db-wal
