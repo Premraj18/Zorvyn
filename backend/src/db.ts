@@ -35,7 +35,15 @@ if (!mongoUri) {
 }
 
 const mongoDbName = process.env.MONGO_DB_NAME ?? "finance_dashboard";
-const client = new MongoClient(mongoUri);
+const client = new MongoClient(mongoUri, {
+  // Serverless-friendly defaults to avoid long hangs on bad network/Atlas config.
+  maxPoolSize: 5,
+  minPoolSize: 0,
+  maxIdleTimeMS: 15000,
+  serverSelectionTimeoutMS: 5000,
+  connectTimeoutMS: 10000,
+  socketTimeoutMS: 20000
+});
 let initialized = false;
 let connectPromise: Promise<unknown> | null = null;
 let initializationPromise: Promise<void> | null = null;
