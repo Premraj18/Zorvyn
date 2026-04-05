@@ -1,120 +1,192 @@
 import { Router } from "express";
-import db from "../db.js";
+import { getRecordsCollection } from "../db.js";
 import { requirePermission } from "../middlewares.js";
 import { recentActivityQuerySchema, trendQuerySchema } from "../validators.js";
 
 export const summaryRouter = Router();
 
 function getDateFilter(query: Record<string, unknown>) {
-  const clauses: string[] = [];
-  const params: string[] = [];
+  const filter: Record<string, unknown> = {};
 
   const startDate = typeof query.startDate === "string" ? query.startDate : undefined;
   const endDate = typeof query.endDate === "string" ? query.endDate : undefined;
 
-  if (startDate) {
-    clauses.push("date >= ?");
-    params.push(startDate);
+  if (startDate || endDate) {
+    filter.date = {};
+
+    if (startDate) {
+      (filter.date as Record<string, string>).$gte = startDate;
+    }
+
+    if (endDate) {
+      (filter.date as Record<string, string>).$lte = endDate;
+    }
   }
 
-  if (endDate) {
-    clauses.push("date <= ?");
-    params.push(endDate);
-  }
-
-  const whereClause = clauses.length ? `WHERE ${clauses.join(" AND ")}` : "";
-  return { whereClause, params };
+  return filter;
 }
 
-summaryRouter.get("/overview", requirePermission("summary:read"), (req, res) => {
-  const { whereClause, params } = getDateFilter(req.query as Record<string, unknown>);
+summaryRouter.get("/overview", requirePermission("summary:read"), async (req, res) => {
+  const recordsCollection = await getRecordsCollection();
+  const match = getDateFilter(req.query as Record<string, unknown>);
 
-  const totals = db
-    .prepare(
-      `
-      SELECT
-        COALESCE(SUM(CASE WHEN type = 'income' THEN amount END), 0) as totalIncome,
-        COALESCE(SUM(CASE WHEN type = 'expense' THEN amount END), 0) as totalExpense,
-        COUNT(*) as totalRecords
-      FROM records
-      ${whereClause}
-      `
-    )
-    .get(...params) as { totalIncome: number; totalExpense: number; totalRecords: number };
+  const [totals] = await recordsCollection
+    .aggregate([
+      { $match: match },
+      {
+        $group: {
+          _id: null,
+          totalIncome: {
+            $sum: {
+              $cond: [{ $eq: ["$type", "income"] }, "$amount", 0]
+            }
+          },
+          totalExpense: {
+            $sum: {
+              $cond: [{ $eq: ["$type", "expense"] }, "$amount", 0]
+            }
+          },
+          totalRecords: { $sum: 1 }
+        }
+      },
+      {
+        $project: {
+          _id: 0,
+          totalIncome: 1,
+          totalExpense: 1,
+          totalRecords: 1
+        }
+      }
+    ])
+    .toArray();
+
+  const normalized = {
+    totalIncome: Number(totals?.totalIncome ?? 0),
+    totalExpense: Number(totals?.totalExpense ?? 0),
+    totalRecords: Number(totals?.totalRecords ?? 0)
+  };
 
   res.json({
     data: {
-      ...totals,
-      netBalance: Number((totals.totalIncome - totals.totalExpense).toFixed(2))
+      ...normalized,
+      netBalance: Number((normalized.totalIncome - normalized.totalExpense).toFixed(2))
     }
   });
 });
 
-summaryRouter.get("/category-totals", requirePermission("summary:read"), (req, res) => {
-  const { whereClause, params } = getDateFilter(req.query as Record<string, unknown>);
+summaryRouter.get("/category-totals", requirePermission("summary:read"), async (req, res) => {
+  const recordsCollection = await getRecordsCollection();
+  const match = getDateFilter(req.query as Record<string, unknown>);
 
-  const rows = db
-    .prepare(
-      `
-      SELECT category, type, SUM(amount) as total
-      FROM records
-      ${whereClause}
-      GROUP BY category, type
-      ORDER BY total DESC
-      `
-    )
-    .all(...params);
+  const rows = await recordsCollection
+    .aggregate([
+      { $match: match },
+      {
+        $group: {
+          _id: { category: "$category", type: "$type" },
+          total: { $sum: "$amount" }
+        }
+      },
+      { $sort: { total: -1 } },
+      {
+        $project: {
+          _id: 0,
+          category: "$_id.category",
+          type: "$_id.type",
+          total: 1
+        }
+      }
+    ])
+    .toArray();
 
   res.json({ data: rows });
 });
 
-summaryRouter.get("/trends", requirePermission("summary:read"), (req, res) => {
+summaryRouter.get("/trends", requirePermission("summary:read"), async (req, res) => {
   const { period } = trendQuerySchema.parse(req.query);
+  const recordsCollection = await getRecordsCollection();
 
-  const bucketExpression =
-    period === "weekly"
-      ? "strftime('%Y-W%W', date)"
-      : "strftime('%Y-%m', date)";
+  const format = period === "weekly" ? "%G-W%V" : "%Y-%m";
 
-  const rows = db
-    .prepare(
-      `
-      SELECT
-        ${bucketExpression} as bucket,
-        COALESCE(SUM(CASE WHEN type = 'income' THEN amount END), 0) as income,
-        COALESCE(SUM(CASE WHEN type = 'expense' THEN amount END), 0) as expense
-      FROM records
-      GROUP BY bucket
-      ORDER BY bucket ASC
-      `
-    )
-    .all();
+  const rows = await recordsCollection
+    .aggregate([
+      {
+        $addFields: {
+          parsedDate: {
+            $dateFromString: {
+              dateString: "$date",
+              format: "%Y-%m-%d"
+            }
+          }
+        }
+      },
+      {
+        $group: {
+          _id: {
+            $dateToString: {
+              format,
+              date: "$parsedDate"
+            }
+          },
+          income: {
+            $sum: {
+              $cond: [{ $eq: ["$type", "income"] }, "$amount", 0]
+            }
+          },
+          expense: {
+            $sum: {
+              $cond: [{ $eq: ["$type", "expense"] }, "$amount", 0]
+            }
+          }
+        }
+      },
+      { $sort: { _id: 1 } },
+      {
+        $project: {
+          _id: 0,
+          bucket: "$_id",
+          income: 1,
+          expense: 1
+        }
+      }
+    ])
+    .toArray();
 
   res.json({ data: rows });
 });
 
-summaryRouter.get("/recent-activity", requirePermission("summary:read"), (req, res) => {
+summaryRouter.get("/recent-activity", requirePermission("summary:read"), async (req, res) => {
   const { limit } = recentActivityQuerySchema.parse(req.query);
+  const recordsCollection = await getRecordsCollection();
 
-  const rows = db
-    .prepare(
-      `
-      SELECT
-        r.id,
-        r.amount,
-        r.type,
-        r.category,
-        r.date,
-        r.notes,
-        r.created_at as createdAt,
-        u.name as createdByName
-      FROM records r
-      JOIN users u ON u.id = r.created_by
-      ORDER BY r.created_at DESC
-      LIMIT ?
-      `
-    )
-    .all(limit);
+  const rows = await recordsCollection
+    .aggregate([
+      { $sort: { createdAt: -1 } },
+      { $limit: limit },
+      {
+        $lookup: {
+          from: "users",
+          localField: "created_by",
+          foreignField: "id",
+          as: "creator"
+        }
+      },
+      { $unwind: { path: "$creator", preserveNullAndEmptyArrays: true } },
+      {
+        $project: {
+          _id: 0,
+          id: 1,
+          amount: 1,
+          type: 1,
+          category: 1,
+          date: 1,
+          notes: 1,
+          createdAt: 1,
+          createdByName: "$creator.name"
+        }
+      }
+    ])
+    .toArray();
 
   res.json({ data: rows });
 });

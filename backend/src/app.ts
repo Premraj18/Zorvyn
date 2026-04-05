@@ -3,7 +3,7 @@ dotenv.config();
 import cors from "cors";
 import express from "express";
 import { z } from "zod";
-import db from "./db.js";
+import { getNextSequence, getUsersCollection, initDatabase } from "./db.js";
 import { AppError } from "./errors.js";
 import { errorHandler, notFoundHandler, authMiddleware } from "./middlewares.js";
 import { usersRouter } from "./routes/users.js";
@@ -27,12 +27,17 @@ app.get("/health", (_req, res) => {
   res.json({ status: "ok" });
 });
 
+app.use(async (_req, _res, next) => {
+  await initDatabase();
+  next();
+});
+
 const bootstrapAdminSchema = z.object({
   name: z.string().trim().min(2),
   email: z.email()
 });
 
-app.post("/api/bootstrap/admin", (req, res) => {
+app.post("/api/bootstrap/admin", async (req, res) => {
   const configuredToken = process.env.BOOTSTRAP_ADMIN_TOKEN;
   if (!configuredToken) {
     throw new AppError("BOOTSTRAP_ADMIN_TOKEN is not configured", 500);
@@ -43,22 +48,26 @@ app.post("/api/bootstrap/admin", (req, res) => {
     throw new AppError("Invalid bootstrap token", 401);
   }
 
-  const usersCount = db.prepare("SELECT COUNT(*) as count FROM users").get() as { count: number };
-  if (usersCount.count > 0) {
+  const usersCollection = await getUsersCollection();
+  const usersCount = await usersCollection.countDocuments();
+  if (usersCount > 0) {
     throw new AppError("Bootstrap already completed", 409);
   }
 
   const input = bootstrapAdminSchema.parse(req.body);
+  const now = new Date().toISOString();
+  const newId = await getNextSequence("users");
 
-  const result = db
-    .prepare("INSERT INTO users (name, email, role, is_active) VALUES (?, ?, 'admin', 1)")
-    .run(input.name, input.email);
+  await usersCollection.insertOne({
+    id: newId,
+    name: input.name,
+    email: input.email,
+    role: "admin",
+    isActive: 1,
+    createdAt: now
+  });
 
-  const user = db
-    .prepare(
-      "SELECT id, name, email, role, is_active as isActive, created_at as createdAt FROM users WHERE id = ?"
-    )
-    .get(result.lastInsertRowid);
+  const user = await usersCollection.findOne({ id: newId }, { projection: { _id: 0 } });
 
   res.status(201).json({ data: user });
 });

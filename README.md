@@ -3,7 +3,7 @@
 A full-stack submission for the assignment with:
 
 - Express + TypeScript backend
-- SQLite persistence using better-sqlite3
+- MongoDB persistence using official Node driver
 - Role-based access control (viewer, analyst, admin)
 - Financial records CRUD and filtering
 - Dashboard summary APIs (overview, category totals, trends, recent activity)
@@ -16,7 +16,7 @@ A full-stack submission for the assignment with:
 
 ## Tech Choices
 
-- Backend: Node.js, Express, TypeScript, Zod, SQLite
+- Backend: Node.js, Express, TypeScript, Zod, MongoDB
 - Frontend: React, Vite, Tailwind CSS
 - Auth style: Mock auth via `x-user-id` request header
 
@@ -61,8 +61,8 @@ Permissions are enforced in middleware.
 
 ### 6. Persistence
 
-- SQLite database file: `backend/finance.db`
-- Auto-creates tables on startup
+- MongoDB database configured by `MONGO_URI` and `MONGO_DB_NAME`
+- Auto-creates indexes on startup
 - Auto-seeds initial users:
   - Admin User (id 1)
   - Analyst User (id 2)

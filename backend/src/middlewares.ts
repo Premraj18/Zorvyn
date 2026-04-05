@@ -1,6 +1,6 @@
 import type { NextFunction, Request, Response } from "express";
 import { ZodError } from "zod";
-import db from "./db.js";
+import { getUsersCollection } from "./db.js";
 import { AppError } from "./errors.js";
 import { ROLE_PERMISSIONS } from "./constants.js";
 import type { RequestUser, Role } from "./types.js";
@@ -13,7 +13,7 @@ declare global {
   }
 }
 
-export function authMiddleware(req: Request, _res: Response, next: NextFunction): void {
+export async function authMiddleware(req: Request, _res: Response, next: NextFunction): Promise<void> {
   const userIdHeader = req.header("x-user-id");
 
   if (!userIdHeader) {
@@ -25,9 +25,11 @@ export function authMiddleware(req: Request, _res: Response, next: NextFunction)
     throw new AppError("x-user-id must be numeric", 400);
   }
 
-  const user = db
-    .prepare("SELECT id, name, email, role, is_active as isActive FROM users WHERE id = ?")
-    .get(userId) as RequestUser | undefined;
+  const users = await getUsersCollection();
+  const user = (await users.findOne(
+    { id: userId },
+    { projection: { _id: 0, id: 1, name: 1, email: 1, role: 1, isActive: 1 } }
+  )) as RequestUser | null;
 
   if (!user) {
     throw new AppError("User not found", 401);

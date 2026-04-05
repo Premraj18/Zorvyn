@@ -1,60 +1,153 @@
-import Database from "better-sqlite3";
-import path from "node:path";
+import dotenv from 'dotenv';
+dotenv.config();
+import { MongoClient, MongoServerError } from "mongodb";
+import type { Role } from "./types.js";
 
-function getDbPath(): string {
-  const envPath = process.env.DB_PATH;
+type CounterDoc = {
+  _id: string;
+  seq: number;
+};
 
-  if (process.env.VERCEL) {
-    // Vercel serverless can only write to /tmp, so force any custom file name there.
-    if (!envPath) {
-      return "/tmp/finance.db";
-    }
+export type UserDoc = {
+  id: number;
+  name: string;
+  email: string;
+  role: Role;
+  isActive: number;
+  createdAt: string;
+};
 
-    return envPath.startsWith("/tmp/") ? envPath : `/tmp/${path.basename(envPath)}`;
+export type RecordDoc = {
+  id: number;
+  amount: number;
+  type: "income" | "expense";
+  category: string;
+  date: string;
+  notes: string;
+  created_by: number;
+  createdAt: string;
+  updatedAt: string;
+};
+
+const mongoUri = process.env.MONGO_URI;
+if (!mongoUri) {
+  throw new Error("MONGO_URI is required");
+}
+
+const mongoDbName = process.env.MONGO_DB_NAME ?? "finance_dashboard";
+const client = new MongoClient(mongoUri);
+let initialized = false;
+let connectPromise: Promise<unknown> | null = null;
+let initializationPromise: Promise<void> | null = null;
+
+export async function getDb() {
+  if (!connectPromise) {
+    connectPromise = client.connect();
   }
 
-  return envPath ?? "finance.db";
+  await connectPromise;
+  return client.db(mongoDbName);
 }
 
-const resolvedDbPath = getDbPath();
-
-const db = new Database(resolvedDbPath);
-db.pragma("journal_mode = WAL");
-
-db.exec(`
-  CREATE TABLE IF NOT EXISTS users (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    name TEXT NOT NULL,
-    email TEXT NOT NULL UNIQUE,
-    role TEXT NOT NULL CHECK (role IN ('viewer', 'analyst', 'admin')),
-    is_active INTEGER NOT NULL DEFAULT 1,
-    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-  );
-
-  CREATE TABLE IF NOT EXISTS records (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    amount REAL NOT NULL CHECK (amount >= 0),
-    type TEXT NOT NULL CHECK (type IN ('income', 'expense')),
-    category TEXT NOT NULL,
-    date TEXT NOT NULL,
-    notes TEXT,
-    created_by INTEGER NOT NULL,
-    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY(created_by) REFERENCES users(id)
-  );
-`);
-
-const usersCount = db.prepare("SELECT COUNT(*) as count FROM users").get() as { count: number };
-
-if (usersCount.count === 0) {
-  const seedUsers = db.prepare(
-    "INSERT INTO users (name, email, role, is_active) VALUES (?, ?, ?, ?)"
-  );
-
-  seedUsers.run("Admin User", "admin@finance.local", "admin", 1);
-  seedUsers.run("Analyst User", "analyst@finance.local", "analyst", 1);
-  seedUsers.run("Viewer User", "viewer@finance.local", "viewer", 1);
+export async function getUsersCollection() {
+  const db = await getDb();
+  return db.collection<UserDoc>("users");
 }
 
-export default db;
+export async function getRecordsCollection() {
+  const db = await getDb();
+  return db.collection<RecordDoc>("records");
+}
+
+export async function getCountersCollection() {
+  const db = await getDb();
+  return db.collection<CounterDoc>("counters");
+}
+
+export async function getNextSequence(name: "users" | "records"): Promise<number> {
+  const counters = await getCountersCollection();
+  const counter = await counters.findOneAndUpdate(
+    { _id: name },
+    { $inc: { seq: 1 } },
+    { upsert: true, returnDocument: "after" }
+  );
+
+  if (!counter) {
+    throw new Error("Failed to generate sequence");
+  }
+
+  return counter.seq;
+}
+
+function isDuplicateKeyError(error: unknown): boolean {
+  return error instanceof MongoServerError && error.code === 11000;
+}
+
+async function ensureSeedUsers(): Promise<void> {
+  const users = await getUsersCollection();
+  const userCount = await users.countDocuments();
+
+  if (userCount > 0) {
+    return;
+  }
+
+  const now = new Date().toISOString();
+  const seedUsers = [
+    { name: "Admin User", email: "admin@finance.local", role: "admin" as const },
+    { name: "Analyst User", email: "analyst@finance.local", role: "analyst" as const },
+    { name: "Viewer User", email: "viewer@finance.local", role: "viewer" as const }
+  ];
+
+  for (const seedUser of seedUsers) {
+    const nextId = await getNextSequence("users");
+
+    try {
+      await users.insertOne({
+        id: nextId,
+        name: seedUser.name,
+        email: seedUser.email,
+        role: seedUser.role,
+        isActive: 1,
+        createdAt: now
+      });
+    } catch (error) {
+      if (!isDuplicateKeyError(error)) {
+        throw error;
+      }
+    }
+  }
+
+  const counters = await getCountersCollection();
+  await counters.updateOne({ _id: "users" }, { $max: { seq: 3 } }, { upsert: true });
+}
+
+export async function initDatabase(): Promise<void> {
+  if (initialized) {
+    return;
+  }
+
+  if (initializationPromise) {
+    await initializationPromise;
+    return;
+  }
+
+  initializationPromise = (async () => {
+    const users = await getUsersCollection();
+    const records = await getRecordsCollection();
+
+    await users.createIndex({ id: 1 }, { unique: true });
+    await users.createIndex({ email: 1 }, { unique: true });
+    await records.createIndex({ id: 1 }, { unique: true });
+    await records.createIndex({ created_by: 1 });
+    await records.createIndex({ date: 1 });
+
+    await ensureSeedUsers();
+    initialized = true;
+  })();
+
+  try {
+    await initializationPromise;
+  } finally {
+    initializationPromise = null;
+  }
+}
