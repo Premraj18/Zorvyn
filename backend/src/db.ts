@@ -1,6 +1,22 @@
 import Database from "better-sqlite3";
+import path from "node:path";
 
-const resolvedDbPath = process.env.DB_PATH ?? (process.env.VERCEL ? "/tmp/finance.db" : "finance.db");
+function getDbPath(): string {
+  const envPath = process.env.DB_PATH;
+
+  if (process.env.VERCEL) {
+    // Vercel serverless can only write to /tmp, so force any custom file name there.
+    if (!envPath) {
+      return "/tmp/finance.db";
+    }
+
+    return envPath.startsWith("/tmp/") ? envPath : `/tmp/${path.basename(envPath)}`;
+  }
+
+  return envPath ?? "finance.db";
+}
+
+const resolvedDbPath = getDbPath();
 
 const db = new Database(resolvedDbPath);
 db.pragma("journal_mode = WAL");

@@ -40,7 +40,7 @@ type Trend = {
   expense: number;
 };
 
-const API_BASE = import.meta.env.VITE_API_URL ?? "http://localhost:4000";
+const API_BASE = import.meta.env.VITE_API_URL;
 
 const permissions: Record<Role, string[]> = {
   viewer: ["users:read", "records:read", "summary:read"],
